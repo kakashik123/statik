@@ -1,47 +1,45 @@
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, html
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Конфигурация ---
 API_TOKEN = '8704131430:AAGkjgqWtdWrwfYHOYhUlrRdoGCEubS9lUc'
-ADMIN_ID = 7458899849  # Ваш ID
+ADMIN_ID = 7458899849
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 # --- Логика БД ---
 def get_db():
-    conn = sqlite3.connect('chat_stats.db')
-    return conn
+    return sqlite3.connect('chat_stats.db')
 
 def init_db():
     with get_db() as conn:
+        # Добавляем хранение user_id, чтобы ссылки на профиль работали всегда
         conn.execute('''CREATE TABLE IF NOT EXISTS messages 
-                       (user_id INTEGER, username TEXT, timestamp DATETIME)''')
+                        (user_id INTEGER, username TEXT, timestamp DATETIME)''')
 
 def log_message(user_id, username):
     with get_db() as conn:
         conn.execute('INSERT INTO messages VALUES (?, ?, ?)', 
-                    (user_id, username, datetime.now()))
+                     (user_id, username, datetime.now()))
 
 def fetch_top_users(period_type):
     now = datetime.now()
     if period_type == "day":
-        # С начала текущих суток
         start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period_type == "week":
-        # Последние 7 дней
         start_date = now - timedelta(days=7)
     elif period_type == "month":
-        # Последние 30 дней
         start_date = now - timedelta(days=30)
     else:
         start_date = None
 
-    query = "SELECT username, COUNT(*) as cnt FROM messages"
+    # Получаем username, количество и user_id для создания ссылок
+    query = "SELECT username, COUNT(*) as cnt, user_id FROM messages"
     params = []
     if start_date:
         query += " WHERE timestamp > ?"
@@ -76,16 +74,30 @@ async def process_stats_callback(callback: types.CallbackQuery):
     
     titles = {"day": "за сегодня", "week": "за неделю", "month": "за месяц", "all": "за все время"}
     
-    response = f"🏆 **ТОП-15 участников {titles[period]}:**\n\n"
-    if not data:
-        response += "Пока здесь пусто..."
-    else:
-        for i, (name, count) in enumerate(data, 1):
-            user = f"@{name}" if name else "Аноним"
-            response += f"{i}. {user} — **{count}** сообщ.\n"
+    # Используем HTML теги <b> вместо Markdown
+    response = f"🏆 <b>ТОП-15 участников {titles[period]}:</b>\n\n"
     
-    # Редактируем сообщение, добавляя кнопки обратно для навигации
-    await callback.message.edit_text(response, parse_mode="Markdown", reply_markup=get_stats_kb())
+    if not data:
+        response += "<i>Пока здесь пусто...</i>"
+    else:
+        for i, (name, count, uid) in enumerate(data, 1):
+            # Если ника нет, используем ID. html.quote защищает от спецсимволов.
+            display_name = name if name else f"User_{uid}"
+            user_link = html.link(display_name, f"tg://user?id={uid}")
+            
+            response += f"{i}. {user_link} — <b>{count}</b> сообщ.\n"
+    
+    try:
+        await callback.message.edit_text(
+            text=response, 
+            parse_mode="HTML", 
+            reply_markup=get_stats_kb(),
+            disable_web_page_preview=True # Чтобы не вылазили превью профилей
+        )
+    except Exception as e:
+        # Если вдруг возникнет ошибка (например, сообщение идентично), бот не упадет
+        print(f"Ошибка при редактировании: {e}")
+    
     await callback.answer()
 
 @dp.message(Command("admin"))
@@ -106,12 +118,17 @@ async def reset_stats(callback: types.CallbackQuery):
 
 @dp.message()
 async def tracker(message: types.Message):
-    if message.chat.type in ['group', 'supergroup'] and message.from_user:
+    # Логируем только сообщения из групп/супергрупп от реальных пользователей
+    if message.chat.type in ['group', 'supergroup'] and message.from_user and not message.from_user.is_bot:
         log_message(message.from_user.id, message.from_user.username)
 
 async def main():
     init_db()
+    print("Бот запущен...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот выключен")
